@@ -36,7 +36,7 @@ void nix_exit_handler(int s) {
 }
 #endif
 
-// Set the function to handle the CTRL-C
+// Set the function to handle interactive and non-interactive termination signals
 void SetCtrlHandler() {
 #ifdef _WIN32
     SetConsoleCtrlHandler((PHANDLER_ROUTINE)CtrlHandler, TRUE);
@@ -46,5 +46,6 @@ void SetCtrlHandler() {
     sigemptyset(&sigIntHandler.sa_mask);
     sigIntHandler.sa_flags = 0;
     sigaction(SIGINT, &sigIntHandler, NULL);
+    sigaction(SIGTERM, &sigIntHandler, NULL);
 #endif
 }

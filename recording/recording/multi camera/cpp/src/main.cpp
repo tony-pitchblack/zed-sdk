@@ -51,8 +51,8 @@ void acquisition(CameraType& zed) {
 
     std::cout << infos.camera_model << "[" << infos.serial_number << "] QUIT \n";
 
-    // disable Streaming
-    zed.disableStreaming();
+    // disable recording before closing the camera
+    zed.disableRecording();
     // close the Camera
     zed.close();
 }
