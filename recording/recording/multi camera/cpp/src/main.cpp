@@ -18,12 +18,9 @@
 //
 ///////////////////////////////////////////////////////////////////////////
 
-/****************************************************************************************
-** This sample shows how to record video in Stereolabs SVO format                      **
-** SVO video files can be played with the ZED API and used with its different modules  **
-*****************************************************************************************/
-
 // Standard includes
+#include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -36,67 +33,101 @@
 // Sample includes
 #include "utils.hpp"
 
-/// \brief Acquisition function template
-/// \tparam CameraType Type of the camera (e.g., sl::Camera, sl::CameraOne)
-/// \param zed Reference to the camera object
+struct AppOptions {
+    bool record_sensors = false;
+    int open_timeout_sec = 15;
+};
+
 template <typename CameraType>
 void acquisition(CameraType& zed) {
     auto infos = zed.getCameraInformation();
 
     while (!exit_app) {
         if (zed.grab() <= sl::ERROR_CODE::SUCCESS) {
-            // If needed, add more processing here
         }
     }
 
     std::cout << infos.camera_model << "[" << infos.serial_number << "] QUIT \n";
 
-    // disable recording before closing the camera
     zed.disableRecording();
-    // close the Camera
     zed.close();
 }
 
-/// Function to set the depth mode in InitParameters
-inline void setDepthMode(sl::InitParameters& ip) {
-    ip.depth_mode = sl::DEPTH_MODE::NONE; // No depth mode for this example
+void printUsage(const char* prog) {
+    std::cout << "Usage: " << prog << " [--record-sensors] [--open-timeout-sec <seconds>]\n";
+    std::cout << "  --record-sensors             Require motion sensors and include native sensor metadata in SVO\n";
+    std::cout << "  --open-timeout-sec <seconds> Retry camera open once per second. Default: 15\n";
+    std::cout << "  -h, --help                   Show this help\n";
 }
 
-/// Function to set the depth mode in InitParametersOne
-inline void setDepthMode(sl::InitParametersOne& ip) {
-    // NA
-}
+enum class ParseResult { Ok, Help, Error };
 
-/// \brief Open a camera with the given serial number, and enable recording
-/// \tparam CameraType Type of the camera (e.g., sl::Camera, sl::CameraOne)
-/// \tparam IP Type of the InitParameters (e.g., sl::InitParameters, sl::InitParametersOne)
-/// \param zed Reference to the camera object
-/// \param sn Serial number of the camera
-/// \param camera_fps Desired camera frame rate (default is 30)
-template <typename CameraType, typename IP>
-bool openCamera(CameraType& zed, const int sn, const int camera_fps = 30) {
-
-    IP init_parameters;
-    init_parameters.camera_resolution = sl::RESOLUTION::AUTO;
-    setDepthMode(init_parameters);
-    init_parameters.input.setFromSerialNumber(sn);
-    init_parameters.camera_fps = camera_fps;
-
-    // Open the camera
-    const sl::ERROR_CODE open_err = zed.open(init_parameters);
-    if (open_err <= sl::ERROR_CODE::SUCCESS) {
-        std::cout << toString(zed.getCameraInformation().camera_model) << "_SN" << sn << " Opened" << std::endl;
-    } else {
-        std::cout << "ZED SN:" << sn << " Error: " << open_err << std::endl;
-        zed.close();
-        return false;
+ParseResult parseArgs(int argc, char** argv, AppOptions& opts) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--record-sensors") {
+            opts.record_sensors = true;
+        } else if (arg == "--open-timeout-sec") {
+            if (i + 1 >= argc) {
+                std::cout << "Missing value for --open-timeout-sec" << std::endl;
+                printUsage(argv[0]);
+                return ParseResult::Error;
+            }
+            char* end = nullptr;
+            const long timeout = std::strtol(argv[++i], &end, 10);
+            if (*end != '\0' || timeout <= 0) {
+                std::cout << "Invalid --open-timeout-sec value: " << argv[i] << std::endl;
+                printUsage(argv[0]);
+                return ParseResult::Error;
+            }
+            opts.open_timeout_sec = static_cast<int>(timeout);
+        } else if (arg == "--help" || arg == "-h") {
+            printUsage(argv[0]);
+            return ParseResult::Help;
+        } else {
+            std::cout << "Unknown argument: " << arg << std::endl;
+            printUsage(argv[0]);
+            return ParseResult::Error;
+        }
     }
+    return ParseResult::Ok;
+}
 
-    // Enable streaming
+bool validateStereoSensors(sl::Camera& zed, const int sn) {
+    sl::SensorsData sensors_data;
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        const sl::ERROR_CODE err = zed.getSensorsData(sensors_data, sl::TIME_REFERENCE::CURRENT);
+        if (err <= sl::ERROR_CODE::SUCCESS && sensors_data.imu.is_available) {
+            std::cout << "ZED SN:" << sn << " Sensors validated" << std::endl;
+            return true;
+        }
+        sl::sleep_ms(100);
+    }
+    std::cout << "ZED SN:" << sn << " Sensor validation failed" << std::endl;
+    return false;
+}
+
+template <typename CameraType, typename InitParametersType>
+sl::ERROR_CODE openCameraWithRetry(CameraType& zed, const InitParametersType& init_parameters, const int timeout_sec) {
+    sl::ERROR_CODE open_err = sl::ERROR_CODE::CAMERA_NOT_DETECTED;
+    for (int attempt = 0; attempt < timeout_sec; ++attempt) {
+        open_err = zed.open(init_parameters);
+        if (open_err <= sl::ERROR_CODE::SUCCESS) {
+            return open_err;
+        }
+        zed.close();
+        if (attempt + 1 < timeout_sec) {
+            sl::sleep_ms(1000);
+        }
+    }
+    return open_err;
+}
+
+template <typename CameraType>
+bool startRecording(CameraType& zed, const int sn) {
     sl::RecordingParameters recording_params;
     std::string svo_filename = std::string(sl::toString(zed.getCameraInformation().camera_model)) + "_SN" + std::to_string(sn) + ".svo2";
-    ;
-    svo_filename.erase(std::remove(svo_filename.begin(), svo_filename.end(), ' '), svo_filename.end()); // Remove spaces from the filename
+    svo_filename.erase(std::remove(svo_filename.begin(), svo_filename.end(), ' '), svo_filename.end());
     recording_params.video_filename.set(svo_filename.c_str());
     recording_params.compression_mode = sl::SVO_COMPRESSION_MODE::H265;
     const sl::ERROR_CODE recording_err = zed.enableRecording(recording_params);
@@ -112,7 +143,50 @@ bool openCamera(CameraType& zed, const int sn, const int camera_fps = 30) {
     return true;
 }
 
-/// Function to print device information
+bool openStereoCamera(sl::Camera& zed, const int sn, const int camera_fps, const bool record_sensors, const int open_timeout_sec) {
+    sl::InitParameters init_parameters;
+    init_parameters.camera_resolution = sl::RESOLUTION::AUTO;
+    init_parameters.depth_mode = sl::DEPTH_MODE::NONE;
+    init_parameters.input.setFromSerialNumber(sn);
+    init_parameters.camera_fps = camera_fps;
+    init_parameters.sensors_required = record_sensors;
+    init_parameters.open_timeout_sec = 1.0f;
+
+    const sl::ERROR_CODE open_err = openCameraWithRetry(zed, init_parameters, open_timeout_sec);
+    if (open_err <= sl::ERROR_CODE::SUCCESS) {
+        std::cout << toString(zed.getCameraInformation().camera_model) << "_SN" << sn << " Opened" << std::endl;
+    } else {
+        std::cout << "ZED SN:" << sn << " Error: " << open_err << std::endl;
+        zed.close();
+        return false;
+    }
+
+    if (record_sensors && !validateStereoSensors(zed, sn)) {
+        zed.close();
+        return false;
+    }
+
+    return startRecording(zed, sn);
+}
+
+bool openOneCamera(sl::CameraOne& zed, const int sn, const int camera_fps, const int open_timeout_sec) {
+    sl::InitParametersOne init_parameters;
+    init_parameters.camera_resolution = sl::RESOLUTION::AUTO;
+    init_parameters.input.setFromSerialNumber(sn);
+    init_parameters.camera_fps = camera_fps;
+
+    const sl::ERROR_CODE open_err = openCameraWithRetry(zed, init_parameters, open_timeout_sec);
+    if (open_err <= sl::ERROR_CODE::SUCCESS) {
+        std::cout << toString(zed.getCameraInformation().camera_model) << "_SN" << sn << " Opened" << std::endl;
+    } else {
+        std::cout << "ZED SN:" << sn << " Error: " << open_err << std::endl;
+        zed.close();
+        return false;
+    }
+
+    return startRecording(zed, sn);
+}
+
 void printDeviceInfo(const std::vector<sl::DeviceProperties>& devs) {
     for (const auto& dev : devs)
         std::cout << "ID : " << dev.id << ", model : " << dev.camera_model << " , S/N : " << dev.serial_number
@@ -120,7 +194,23 @@ void printDeviceInfo(const std::vector<sl::DeviceProperties>& devs) {
 }
 
 int main(int argc, char** argv) {
-    // Get the list of available ZED cameras
+    AppOptions options;
+    switch (parseArgs(argc, argv, options)) {
+    case ParseResult::Help:
+        return EXIT_SUCCESS;
+    case ParseResult::Error:
+        return EXIT_FAILURE;
+    default:
+        break;
+    }
+
+    if (options.record_sensors) {
+        std::cout << "Recording mode: image + native sensor metadata" << std::endl;
+    } else {
+        std::cout << "Recording mode: image only (sensors not required)" << std::endl;
+    }
+    std::cout << "Camera open timeout: " << options.open_timeout_sec << " seconds" << std::endl;
+
     const std::vector<sl::DeviceProperties> dev_stereo_list = sl::Camera::getDeviceList();
     printDeviceInfo(dev_stereo_list);
 
@@ -134,27 +224,30 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    bool zed_open = false;
+    bool all_open = true;
 
-    // Open the Stereo cameras
     std::vector<sl::Camera> zeds_stereo(nb_stereo);
     for (int z = 0; z < nb_stereo; ++z) {
-        zed_open |= openCamera<sl::Camera, sl::InitParameters>(zeds_stereo[z], dev_stereo_list[z].serial_number);
+        all_open &= openStereoCamera(zeds_stereo[z], dev_stereo_list[z].serial_number, 30, options.record_sensors, options.open_timeout_sec);
     }
 
-    // Open the Mono cameras
     std::vector<sl::CameraOne> zeds_one(nb_one);
     for (int z = 0; z < nb_one; ++z) {
-        zed_open |= openCamera<sl::CameraOne, sl::InitParametersOne>(zeds_one[z], dev_one_list[z].serial_number);
+        all_open &= openOneCamera(zeds_one[z], dev_one_list[z].serial_number, 30, options.open_timeout_sec);
     }
 
-    if (!zed_open) {
-        std::cout << "No ZED opened, exit program" << std::endl;
+    if (!all_open) {
+        std::cout << "One or more cameras were not detected after timeout of " << options.open_timeout_sec << " seconds" << std::endl;
+        for (auto& zed : zeds_stereo)
+            if (zed.isOpened())
+                zed.close();
+        for (auto& zed : zeds_one)
+            if (zed.isOpened())
+                zed.close();
         return EXIT_FAILURE;
     }
 
-    // Create a grab thread for each opened camera
-    std::vector<std::thread> thread_pool(nb_stereo + nb_one); // compute threads
+    std::vector<std::thread> thread_pool(nb_stereo + nb_one);
     for (int z = 0; z < nb_stereo; z++) {
         if (zeds_stereo[z].isOpened())
             thread_pool[z] = std::thread(acquisition<sl::Camera>, std::ref(zeds_stereo[z]));
@@ -164,18 +257,15 @@ int main(int argc, char** argv) {
             thread_pool[nb_stereo + z] = std::thread(acquisition<sl::CameraOne>, std::ref(zeds_one[z]));
     }
 
-    // Ctrl+C to close
     SetCtrlHandler();
     std::cout << "Press Ctrl+C to exit" << std::endl;
-    while (!exit_app) { // main loop
+    while (!exit_app) {
         sl::sleep_ms(20);
     }
 
-    // stop all running threads
     std::cout << "Exit signal, closing ZEDs" << std::endl;
     sl::sleep_ms(100);
 
-    // Wait for every thread to be stopped
     for (auto& th : thread_pool)
         if (th.joinable())
             th.join();
