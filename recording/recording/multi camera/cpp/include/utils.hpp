@@ -20,19 +20,22 @@
 
 #pragma once
 
-static bool exit_app = false;
-
 // Handle the CTRL-C keyboard signal
 #ifdef _WIN32
     #include <Windows.h>
+
+static volatile bool exit_app = false;
 
 void CtrlHandler(DWORD fdwCtrlType) {
     exit_app = (fdwCtrlType == CTRL_C_EVENT);
 }
 #else
     #include <signal.h>
+
+static volatile sig_atomic_t exit_app = 0;
+
 void nix_exit_handler(int s) {
-    exit_app = true;
+    exit_app = 1;
 }
 #endif
 

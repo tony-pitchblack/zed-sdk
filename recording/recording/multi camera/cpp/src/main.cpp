@@ -110,13 +110,13 @@ bool validateStereoSensors(sl::Camera& zed, const int sn) {
 template <typename CameraType, typename InitParametersType>
 sl::ERROR_CODE openCameraWithRetry(CameraType& zed, const InitParametersType& init_parameters, const int timeout_sec) {
     sl::ERROR_CODE open_err = sl::ERROR_CODE::CAMERA_NOT_DETECTED;
-    for (int attempt = 0; attempt < timeout_sec; ++attempt) {
+    for (int attempt = 0; attempt < timeout_sec && !exit_app; ++attempt) {
         open_err = zed.open(init_parameters);
         if (open_err <= sl::ERROR_CODE::SUCCESS) {
             return open_err;
         }
         zed.close();
-        if (attempt + 1 < timeout_sec) {
+        if (attempt + 1 < timeout_sec && !exit_app) {
             sl::sleep_ms(1000);
         }
     }
@@ -135,7 +135,6 @@ bool startRecording(CameraType& zed, const int sn) {
         std::cout << toString(zed.getCameraInformation().camera_model) << "_SN" << sn << " Enabled recording" << std::endl;
     } else {
         std::cout << "ZED SN:" << sn << " Recording initialization error: " << recording_err << std::endl;
-        zed.close();
         return false;
     }
 
@@ -166,7 +165,7 @@ bool openStereoCamera(sl::Camera& zed, const int sn, const int camera_fps, const
         return false;
     }
 
-    return startRecording(zed, sn);
+    return true;
 }
 
 bool openOneCamera(sl::CameraOne& zed, const int sn, const int camera_fps, const int open_timeout_sec) {
@@ -184,7 +183,24 @@ bool openOneCamera(sl::CameraOne& zed, const int sn, const int camera_fps, const
         return false;
     }
 
-    return startRecording(zed, sn);
+    return true;
+}
+
+template <typename CameraType>
+void closeOpenedCameras(std::vector<CameraType>& zeds) {
+    for (auto& zed : zeds)
+        if (zed.isOpened())
+            zed.close();
+}
+
+template <typename CameraType>
+void stopRecordingAndClose(std::vector<CameraType>& zeds) {
+    for (auto& zed : zeds) {
+        if (zed.isOpened()) {
+            zed.disableRecording();
+            zed.close();
+        }
+    }
 }
 
 void printDeviceInfo(const std::vector<sl::DeviceProperties>& devs) {
@@ -211,6 +227,8 @@ int main(int argc, char** argv) {
     }
     std::cout << "Camera open timeout: " << options.open_timeout_sec << " seconds" << std::endl;
 
+    SetCtrlHandler();
+
     const std::vector<sl::DeviceProperties> dev_stereo_list = sl::Camera::getDeviceList();
     printDeviceInfo(dev_stereo_list);
 
@@ -224,27 +242,41 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    bool all_open = true;
-
     std::vector<sl::Camera> zeds_stereo(nb_stereo);
     for (int z = 0; z < nb_stereo; ++z) {
-        all_open &= openStereoCamera(zeds_stereo[z], dev_stereo_list[z].serial_number, 30, options.record_sensors, options.open_timeout_sec);
+        if (exit_app || !openStereoCamera(zeds_stereo[z], dev_stereo_list[z].serial_number, 30, options.record_sensors, options.open_timeout_sec)) {
+            std::cout << "One or more cameras were not detected after timeout of " << options.open_timeout_sec << " seconds" << std::endl;
+            closeOpenedCameras(zeds_stereo);
+            return EXIT_FAILURE;
+        }
     }
 
     std::vector<sl::CameraOne> zeds_one(nb_one);
     for (int z = 0; z < nb_one; ++z) {
-        all_open &= openOneCamera(zeds_one[z], dev_one_list[z].serial_number, 30, options.open_timeout_sec);
+        if (exit_app || !openOneCamera(zeds_one[z], dev_one_list[z].serial_number, 30, options.open_timeout_sec)) {
+            std::cout << "One or more cameras were not detected after timeout of " << options.open_timeout_sec << " seconds" << std::endl;
+            closeOpenedCameras(zeds_stereo);
+            closeOpenedCameras(zeds_one);
+            return EXIT_FAILURE;
+        }
     }
 
-    if (!all_open) {
-        std::cout << "One or more cameras were not detected after timeout of " << options.open_timeout_sec << " seconds" << std::endl;
-        for (auto& zed : zeds_stereo)
-            if (zed.isOpened())
-                zed.close();
-        for (auto& zed : zeds_one)
-            if (zed.isOpened())
-                zed.close();
-        return EXIT_FAILURE;
+    for (int z = 0; z < nb_stereo; ++z) {
+        if (exit_app || !startRecording(zeds_stereo[z], dev_stereo_list[z].serial_number)) {
+            std::cout << "Recording startup aborted before acquisition threads were started" << std::endl;
+            stopRecordingAndClose(zeds_stereo);
+            stopRecordingAndClose(zeds_one);
+            return EXIT_FAILURE;
+        }
+    }
+
+    for (int z = 0; z < nb_one; ++z) {
+        if (exit_app || !startRecording(zeds_one[z], dev_one_list[z].serial_number)) {
+            std::cout << "Recording startup aborted before acquisition threads were started" << std::endl;
+            stopRecordingAndClose(zeds_stereo);
+            stopRecordingAndClose(zeds_one);
+            return EXIT_FAILURE;
+        }
     }
 
     std::vector<std::thread> thread_pool(nb_stereo + nb_one);
@@ -257,7 +289,6 @@ int main(int argc, char** argv) {
             thread_pool[nb_stereo + z] = std::thread(acquisition<sl::CameraOne>, std::ref(zeds_one[z]));
     }
 
-    SetCtrlHandler();
     std::cout << "Press Ctrl+C to exit" << std::endl;
     while (!exit_app) {
         sl::sleep_ms(20);
