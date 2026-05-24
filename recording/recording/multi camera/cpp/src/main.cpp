@@ -37,7 +37,7 @@ struct AppOptions {
     bool record_sensors = false;
     int open_timeout_sec = 15;
     int enumeration_timeout_sec = 15;
-    int enumeration_min_cam = 2;
+    int enumeration_min_cam = 1;
 };
 
 template <typename CameraType>
@@ -61,7 +61,7 @@ void printUsage(const char* prog) {
     std::cout << "  --record-sensors                      Require motion sensors and include native sensor metadata in SVO\n";
     std::cout << "  --open-timeout-sec <seconds>          Retry camera open once per second. Default: 15\n";
     std::cout << "  --enumeration-timeout-sec <seconds>   Retry device enumeration once per second. Default: 15\n";
-    std::cout << "  --enumeration-min-cam <count>         Minimum camera count required before startup. Default: 2\n";
+    std::cout << "  --enumeration-min-cam <count>         Minimum camera count required before startup. Default: 1\n";
     std::cout << "  -h, --help                            Show this help\n";
 }
 
