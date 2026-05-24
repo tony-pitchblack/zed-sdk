@@ -36,6 +36,8 @@
 struct AppOptions {
     bool record_sensors = false;
     int open_timeout_sec = 15;
+    int enumeration_timeout_sec = 15;
+    int enumeration_min_cam = 2;
 };
 
 template <typename CameraType>
@@ -54,10 +56,13 @@ void acquisition(CameraType& zed) {
 }
 
 void printUsage(const char* prog) {
-    std::cout << "Usage: " << prog << " [--record-sensors] [--open-timeout-sec <seconds>]\n";
-    std::cout << "  --record-sensors             Require motion sensors and include native sensor metadata in SVO\n";
-    std::cout << "  --open-timeout-sec <seconds> Retry camera open once per second. Default: 15\n";
-    std::cout << "  -h, --help                   Show this help\n";
+    std::cout << "Usage: " << prog
+              << " [--record-sensors] [--open-timeout-sec <seconds>] [--enumeration-timeout-sec <seconds>] [--enumeration-min-cam <count>]\n";
+    std::cout << "  --record-sensors                      Require motion sensors and include native sensor metadata in SVO\n";
+    std::cout << "  --open-timeout-sec <seconds>          Retry camera open once per second. Default: 15\n";
+    std::cout << "  --enumeration-timeout-sec <seconds>   Retry device enumeration once per second. Default: 15\n";
+    std::cout << "  --enumeration-min-cam <count>         Minimum camera count required before startup. Default: 2\n";
+    std::cout << "  -h, --help                            Show this help\n";
 }
 
 enum class ParseResult { Ok, Help, Error };
@@ -81,6 +86,34 @@ ParseResult parseArgs(int argc, char** argv, AppOptions& opts) {
                 return ParseResult::Error;
             }
             opts.open_timeout_sec = static_cast<int>(timeout);
+        } else if (arg == "--enumeration-timeout-sec") {
+            if (i + 1 >= argc) {
+                std::cout << "Missing value for --enumeration-timeout-sec" << std::endl;
+                printUsage(argv[0]);
+                return ParseResult::Error;
+            }
+            char* end = nullptr;
+            const long timeout = std::strtol(argv[++i], &end, 10);
+            if (*end != '\0' || timeout <= 0) {
+                std::cout << "Invalid --enumeration-timeout-sec value: " << argv[i] << std::endl;
+                printUsage(argv[0]);
+                return ParseResult::Error;
+            }
+            opts.enumeration_timeout_sec = static_cast<int>(timeout);
+        } else if (arg == "--enumeration-min-cam") {
+            if (i + 1 >= argc) {
+                std::cout << "Missing value for --enumeration-min-cam" << std::endl;
+                printUsage(argv[0]);
+                return ParseResult::Error;
+            }
+            char* end = nullptr;
+            const long min_count = std::strtol(argv[++i], &end, 10);
+            if (*end != '\0' || min_count <= 0) {
+                std::cout << "Invalid --enumeration-min-cam value: " << argv[i] << std::endl;
+                printUsage(argv[0]);
+                return ParseResult::Error;
+            }
+            opts.enumeration_min_cam = static_cast<int>(min_count);
         } else if (arg == "--help" || arg == "-h") {
             printUsage(argv[0]);
             return ParseResult::Help;
@@ -209,6 +242,30 @@ void printDeviceInfo(const std::vector<sl::DeviceProperties>& devs) {
                   << " , state : " << dev.camera_state << std::endl;
 }
 
+struct DeviceLists {
+    std::vector<sl::DeviceProperties> stereo;
+    std::vector<sl::DeviceProperties> mono;
+};
+
+DeviceLists getDeviceListsWithRetry(const int timeout_sec, const int min_count) {
+    DeviceLists lists;
+    for (int attempt = 0; attempt < timeout_sec && !exit_app; ++attempt) {
+        lists.stereo = sl::Camera::getDeviceList();
+        lists.mono = sl::CameraOne::getDeviceList();
+        const int total = static_cast<int>(lists.stereo.size() + lists.mono.size());
+        if (total >= min_count) {
+            if (attempt > 0) {
+                std::cout << "Camera enumeration reached minimum count after " << (attempt + 1) << " seconds" << std::endl;
+            }
+            return lists;
+        }
+        if (attempt + 1 < timeout_sec && !exit_app) {
+            sl::sleep_ms(1000);
+        }
+    }
+    return lists;
+}
+
 int main(int argc, char** argv) {
     AppOptions options;
     switch (parseArgs(argc, argv, options)) {
@@ -226,18 +283,26 @@ int main(int argc, char** argv) {
         std::cout << "Recording mode: image only (sensors not required)" << std::endl;
     }
     std::cout << "Camera open timeout: " << options.open_timeout_sec << " seconds" << std::endl;
+    std::cout << "Camera enumeration timeout: " << options.enumeration_timeout_sec << " seconds" << std::endl;
+    std::cout << "Camera enumeration minimum count: " << options.enumeration_min_cam << std::endl;
 
     SetCtrlHandler();
 
-    const std::vector<sl::DeviceProperties> dev_stereo_list = sl::Camera::getDeviceList();
+    const DeviceLists device_lists = getDeviceListsWithRetry(options.enumeration_timeout_sec, options.enumeration_min_cam);
+    const std::vector<sl::DeviceProperties>& dev_stereo_list = device_lists.stereo;
+    const std::vector<sl::DeviceProperties>& dev_one_list = device_lists.mono;
     printDeviceInfo(dev_stereo_list);
-
-    const std::vector<sl::DeviceProperties> dev_one_list = sl::CameraOne::getDeviceList();
     printDeviceInfo(dev_one_list);
 
     const int nb_one = dev_one_list.size();
     const int nb_stereo = dev_stereo_list.size();
-    if (nb_one + nb_stereo == 0) {
+    const int nb_total = nb_one + nb_stereo;
+    if (nb_total < options.enumeration_min_cam) {
+        std::cout << "At least " << options.enumeration_min_cam << " cameras required, found " << nb_total
+                  << " after enumeration timeout of " << options.enumeration_timeout_sec << " seconds" << std::endl;
+        return EXIT_FAILURE;
+    }
+    if (nb_total == 0) {
         std::cout << "No ZED Detected, exit program" << std::endl;
         return EXIT_FAILURE;
     }
